@@ -1,0 +1,189 @@
+// This is an advanced implementation of the algorithm described in the
+// following paper:
+//   J. Zhang and S. Singh. LOAM: Lidar Odometry and Mapping in Real-time.
+//     Robotics: Science and Systems Conference (RSS). Berkeley, CA, July 2014.
+
+// Modifier: Livox               Livox@gmail.com
+
+// Copyright 2013, Ji Zhang, Carnegie Mellon University
+// Further contributions copyright (c) 2016, Southwest Research Institute
+// All rights reserved.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+//
+// 1. Redistributions of source code must retain the above copyright notice,
+//    this list of conditions and the following disclaimer.
+// 2. Redistributions in binary form must reproduce the above copyright notice,
+//    this list of conditions and the following disclaimer in the documentation
+//    and/or other materials provided with the distribution.
+// 3. Neither the name of the copyright holder nor the names of its
+//    contributors may be used to endorse or promote products derived from this
+//    software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+// CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+// POSSIBILITY OF SUCH DAMAGE.
+
+#pragma once
+
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
+#include <cmath>
+
+#include <ros/ros.h>
+#include <sensor_msgs/Imu.h>
+#include <sensor_msgs/PointCloud2.h>
+#include <nav_msgs/Odometry.h>
+#include <std_msgs/Float64MultiArray.h>
+#include <visualization_msgs/MarkerArray.h>
+
+#include <opencv/cv.h>
+#include <opencv2/core/core.hpp>
+#include <opencv2/opencv.hpp>
+
+#include <iostream>
+
+#include <eigen3/Eigen/Dense>
+
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
+#include <pcl_ros/point_cloud.h>
+#include <pcl_conversions/pcl_conversions.h>
+#include <pcl/range_image/range_image.h>
+#include <pcl/filters/filter.h>
+#include <pcl/filters/voxel_grid.h>
+#include <pcl/kdtree/kdtree_flann.h>
+#include <pcl/common/common.h>
+#include <pcl/registration/icp.h>
+
+#include <tf/transform_broadcaster.h>
+#include <tf/transform_datatypes.h>
+ 
+#include <vector>
+#include <cmath>
+#include <algorithm>
+#include <queue>
+#include <deque>
+#include <iostream>
+#include <fstream>
+#include <ctime>
+#include <cfloat>
+#include <iterator>
+#include <sstream>
+#include <string>
+#include <limits>
+#include <iomanip>
+#include <array>
+#include <thread>
+#include <mutex>
+
+#include <chrono>
+
+#define PI 3.14159265
+
+typedef pcl::PointXYZINormal PointType;
+typedef pcl::PointCloud<PointType> PointCloudXYZI;
+
+inline double rad2deg(double radians) { return radians * 180.0 / M_PI; }
+
+inline double deg2rad(double degrees) { return degrees * M_PI / 180.0; }
+
+extern const bool loopClosureEnableFlag = true;
+extern const double mappingProcessInterval = 0.3;
+
+extern const float DISTANCE_SQ_THRESHOLD = 25.0;
+
+extern const float scanPeriod = 0.1;
+extern const int systemDelay = 0;
+extern const int imuQueLength = 200;
+extern const std::string imuTopic = "/livox/imu";
+
+extern const float surroundingKeyframeSearchRadius = 50.0;
+extern const int   surroundingKeyframeSearchNum = 50;
+
+extern const float gnorm = 9.805;
+
+extern const float historyKeyframeSearchRadius = 40.0;
+extern const int   historyKeyframeSearchNum = 25;
+extern const float historyKeyframeFitnessScore = 0.1;
+
+extern const float globalMapVisualizationSearchRadius = 500.0;
+
+// 各变量的首元素索引值
+static constexpr unsigned int pos_ = 0;
+static constexpr unsigned int vel_ = 3;
+static constexpr unsigned int att_ = 6;
+static constexpr unsigned int acc_ = 9;
+static constexpr unsigned int gyr_ = 12;
+static constexpr unsigned int gra_ = 15;
+
+/*!@EARTH COEFFICIENTS */
+extern const double G0 = gnorm;                  // gravity
+extern const double deg = M_PI / 180.0;         // degree
+extern const double rad = 180.0 / M_PI;         // radian
+extern const double dph = deg / 3600.0;         // degree per hour
+extern const double dpsh = deg / sqrt(3600.0);  // degree per square-root hour
+extern const double mg = G0 / 1000.0;           // mili-gravity force
+extern const double ug = mg / 1000.0;           // micro-gravity force
+extern const double mgpsHz = mg / sqrt(1.0);    // mili-gravity force per second
+extern const double ugpsHz = ug / sqrt(1.0);    // micro-gravity force per second
+extern const double Re = 6378137.0;             ///< WGS84 Equatorial radius in meters
+extern const double Rp = 6356752.31425;
+extern const double Ef = 1.0 / 298.257223563;
+extern const double Wie = 7.2921151467e-5;
+extern const double Ee = 0.0818191908425;
+extern const double EeEe = Ee * Ee;
+
+struct smoothness_t{ 
+    float value;
+    size_t ind;
+};
+
+// struct PointXYZIRPYT
+// {
+//     PCL_ADD_POINT4D
+//     PCL_ADD_INTENSITY;
+//     float roll;
+//     float pitch;
+//     float yaw;
+//     double time;
+//     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+// } EIGEN_ALIGN16;
+
+// POINT_CLOUD_REGISTER_POINT_STRUCT (PointXYZIRPYT,
+//                                    (float, x, x) (float, y, y)
+//                                    (float, z, z) (float, intensity, intensity)
+//                                    (float, roll, roll) (float, pitch, pitch) (float, yaw, yaw)
+//                                    (double, time, time)
+// )
+
+// typedef PointXYZIRPYT  PointTypePose;
+
+struct PointXYZIQT
+{
+    PCL_ADD_POINT4D
+    PCL_ADD_INTENSITY;
+    float qx;
+    float qy;
+    float qz;
+    float qw;
+    double time;
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+} EIGEN_ALIGN16;
+
+POINT_CLOUD_REGISTER_POINT_STRUCT (PointXYZIQT,
+                                   (float, x, x) (float, y, y)
+                                   (float, z, z) (float, intensity, intensity)
+                                   (float, qx, qx) (float, qy, qy) (float, qz, qz) (float, qw, qw)
+                                   (double, time, time)
+)
+typedef PointXYZIQT  PointTypePose;

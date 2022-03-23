@@ -1,0 +1,9 @@
+<launch>
+    <!--- Sim Time -->
+    <param name="/use_sim_time" value="true" />
+
+    <include file="$(find faster_lio)/launch/mapping_avia.launch" />
+
+    <node pkg="livox_backend" type="globalOptimization"    name="globalOptimization"    output="screen"/>
+
+</launch>
